@@ -91,20 +91,8 @@ impl<S> From<TlsError> for HandshakeError<S> {
 }
 
 impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::Normal(ref e) => error::Error::description(e),
-            Error::Pkcs12(ref e) => error::Error::description(e),
-            Error::Custom(ref e) => &e,
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::Normal(ref e) => error::Error::cause(e),
-            Error::Pkcs12(ref e) => error::Error::cause(e),
-            Error::Custom(ref _e) => None,
-        }
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        error::Error::source(&self)
     }
 }
 
@@ -198,51 +186,18 @@ impl<S> Debug for TlsStream<S> {
         f.debug_struct("TlsStream")
             .field("role", &self.role)
             .field("ca_certs", &self.ca_certs)
+            // .field("ca_cert_list", &self.ca_cert_list)
             // .field("cred_pk", &self.cred_pk)
-            .field("cred_certs", &self.cred_certs)
+            // .field("cred_certs", &self.cred_certs)
+            // .field("cred_cert_list", &self.cred_cert_list)
             // .field("entropy", &self.entropy)
             // .field("rng", &self.rng)
             // .field("config", &self.config)
             // .field("ctx", &self.ctx)
-            // .field("session", &self.session)
-            .field("socket", &self.socket)
+            // .field("stream", &self.stream)
             .finish()
     }
 }
-
-// impl<S> Drop for TlsStream<S> {
-//     fn drop(&mut self) {
-//         unsafe {
-//             if self.session != ::std::ptr::null_mut() {
-//                 Box::from_raw(self.session);
-//             }
-//             Box::from_raw(self.socket);
-
-//             Box::from_raw(self.ctx);
-//             Box::from_raw(self.config);
-//             Box::from_raw(self.rng);
-//             Box::from_raw(self.entropy);
-
-//             if self.cred_cert_list != ::std::ptr::null_mut() {
-//                 Box::from_raw(self.cred_cert_list);
-//             }
-//             if self.cred_certs != ::std::ptr::null_mut() {
-//                 Box::from_raw(self.cred_certs);
-//             }
-//             if self.cred_pk != ::std::ptr::null_mut() {
-//                 Box::from_raw(self.cred_pk);
-//             }
-
-//             if self.ca_cert_list != ::std::ptr::null_mut() {
-//                 Box::from_raw(self.ca_cert_list);
-//             }
-
-//             if self.ca_certs != ::std::ptr::null_mut() {
-//                 Box::from_raw(self.ca_certs);
-//             }
-//         }
-//     }
-// }
 
 #[derive(Debug)]
 pub struct MidHandshakeTlsStream<S> {
@@ -285,6 +240,20 @@ pub struct TlsConnector {
     use_sni: bool,
 }
 
+impl Debug for TlsConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsConnector")
+            .field("min_protocol", &self.min_protocol)
+            .field("max_protocol", &self.max_protocol)
+            // .field("root_certificates", &self.root_certificates)
+            // .field("identity", &self.identity)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
+            .field("accept_invalid_hostnames", &self.accept_invalid_hostnames)
+            .field("use_sni", &self.use_sni)
+            .finish()
+    }
+}
+
 impl TlsConnector {
     pub fn new(builder: &TlsConnectorBuilder) -> Result<TlsConnector, Error> {
         let trust_roots = if builder.root_certificates.len() > 0 {
@@ -306,8 +275,7 @@ impl TlsConnector {
 
     pub fn connect<S>(&self, domain: &str, stream: S) -> Result<TlsStream<S>, HandshakeError<S>>
     where
-        // S: io::Read + io::Write,
-        S: IoCallback + Send + Sync + 'static
+        S: IoCallback + Send + Sync + 'static,
     {
         let identity = if let Some(identity) = &self.identity {
             let mut keys = (identity.0).0.private_keys().collect::<Vec<_>>();
@@ -340,72 +308,67 @@ impl TlsConnector {
             None
         };
 
-        unsafe {
-            let ca_vec = cert_to_vec(&self.root_certificates);
-            let mut ca_list = Arc::new(MbedtlsList::new());
-            ca_vec.into_iter().for_each(|c| ca_list.push(c));
-            
-            let entropy = Arc::new(OsEntropy::new());
-            let rng = Arc::new(CtrDrbg::new(entropy, None)?);
-            let mut config = Arc::new(Config::new(
-                Endpoint::Client,
-                Transport::Stream,
-                Preset::Default,
-            ));
-            config.set_rng(rng);
-            config.set_ca_list(ca_list, None);
+        let ca_vec = cert_to_vec(&self.root_certificates);
+        let mut ca_list = Arc::new(MbedtlsList::new());
+        ca_vec.into_iter().for_each(|c| ca_list.push(c));
 
-            let mut cred_certs = Default::default();
-            let mut cred_cert_list = Arc::new(MbedtlsList::new());
-            let mut cred_pk = None;
+        let entropy = Arc::new(OsEntropy::new());
+        let rng = Arc::new(CtrDrbg::new(entropy, None)?);
+        let mut config = Arc::new(Config::new(
+            Endpoint::Client,
+            Transport::Stream,
+            Preset::Default,
+        ));
+        config.set_rng(rng);
+        config.set_ca_list(ca_list, None);
 
-            if let Some((certificates, mut pk)) = identity {
-                cred_certs = certificates.to_vec();
-                cred_certs.into_iter().for_each(|c| cred_cert_list.push(c));
-                let cpk = Arc::new(Pk::from_private_key(
-                    &pk.write_private_der_vec()?,
-                    None,
-                )?);
-                cred_pk = Some(cpk);
+        let mut cred_certs = Default::default();
+        let mut cred_cert_list = Arc::new(MbedtlsList::new());
+        let mut cred_pk = None;
 
-                config.push_cert(cred_cert_list, cpk)?;
-            }
+        if let Some((certificates, mut pk)) = identity {
+            cred_certs = certificates.to_vec();
+            cred_certs.into_iter().for_each(|c| cred_cert_list.push(c));
+            let cpk = Arc::new(Pk::from_private_key(&pk.write_private_der_vec()?, None)?);
+            cred_pk = Some(cpk);
 
-            if self.accept_invalid_certs {
-                config.set_authmode(mbedtls::ssl::config::AuthMode::None);
-            }
-
-            if let Some(min_version) = map_version(self.min_protocol) {
-                config.set_min_version(min_version)?;
-            }
-            if let Some(max_version) = map_version(self.max_protocol) {
-                config.set_max_version(max_version)?;
-            }
-
-            let ctx = Arc::new(Context::new(config));
-
-            let hostname = if self.accept_invalid_hostnames {
-                None
-            } else {
-                Some(domain)
-            };
-
-            ctx.establish(stream, hostname)?;
-
-            Ok(TlsStream {
-                role: ProtocolRole::Client,
-                ca_certs: ca_vec,
-                ca_cert_list: ca_list,
-                cred_pk: cred_pk,
-                cred_certs: cred_certs,
-                cred_cert_list: cred_cert_list,
-                entropy,
-                rng,
-                config,
-                ctx: ctx,
-                stream,
-            })
+            config.push_cert(cred_cert_list, cpk)?;
         }
+
+        if self.accept_invalid_certs {
+            config.set_authmode(mbedtls::ssl::config::AuthMode::None);
+        }
+
+        if let Some(min_version) = map_version(self.min_protocol) {
+            config.set_min_version(min_version)?;
+        }
+        if let Some(max_version) = map_version(self.max_protocol) {
+            config.set_max_version(max_version)?;
+        }
+
+        let ctx = Arc::new(Context::new(config));
+
+        let hostname = if self.accept_invalid_hostnames {
+            None
+        } else {
+            Some(domain)
+        };
+
+        ctx.establish(stream, hostname)?;
+
+        Ok(TlsStream {
+            role: ProtocolRole::Client,
+            ca_certs: ca_vec,
+            ca_cert_list: ca_list,
+            cred_pk: cred_pk,
+            cred_certs: cred_certs,
+            cred_cert_list: cred_cert_list,
+            entropy,
+            rng,
+            config,
+            ctx: ctx,
+            stream,
+        })
     }
 }
 
@@ -427,7 +390,8 @@ impl TlsAcceptor {
 
     pub fn accept<S>(&self, stream: S) -> Result<TlsStream<S>, HandshakeError<S>>
     where
-        S: io::Read + io::Write,
+        // S: io::Read + io::Write,
+        S: IoCallback + Send + Sync + 'static,
     {
         let mut keys = self.identity.private_keys().collect::<Vec<_>>();
         let certificates = self.identity.certificates().collect::<Vec<_>>();
@@ -451,53 +415,46 @@ impl TlsAcceptor {
         let key: &mut Pk = &mut keys.pop().unwrap().0.map_err(|_| TlsError::PkInvalidAlg)?;
 
         unsafe {
-            let pk = Box::into_raw(Box::new(Pk::from_private_key(
-                &key.write_private_der_vec()?,
-                None,
-            )?));
-            let cert_chain = Box::into_raw(Box::new(cert_chain.to_vec()));
-            let cert_list = Box::into_raw(Box::new(
-                CertList::from_vec(&mut *cert_chain).ok_or(TlsError::CamelliaInvalidInputLength)?,
-            ));
-            let entropy = Box::into_raw(Box::new(OsEntropy::new()));
-            let rng = Box::into_raw(Box::new(CtrDrbg::new(&mut *entropy, None)?));
-            let config = Box::into_raw(Box::new(Config::new(
+            let pk = Arc::new(Pk::from_private_key(&key.write_private_der_vec()?, None)?);
+            let mut cert_list = Arc::new(MbedtlsList::new());
+            cert_chain
+                .to_vec()
+                .into_iter()
+                .for_each(|c| cert_list.push(c));
+
+            let entropy = Arc::new(OsEntropy::new());
+            let rng = Arc::new(CtrDrbg::new(entropy, None)?);
+            let mut config = Arc::new(Config::new(
                 Endpoint::Server,
                 Transport::Stream,
                 Preset::Default,
-            )));
-            (*config).set_rng(Some(&mut *rng));
-            (*config).push_cert(&mut *cert_list, &mut *pk)?;
+            ));
+            config.set_rng(rng);
+            config.push_cert(cert_list, pk)?;
 
             if let Some(min_version) = map_version(self.min_protocol) {
-                (*config).set_min_version(min_version)?;
+                config.set_min_version(min_version)?;
             }
             if let Some(max_version) = map_version(self.max_protocol) {
-                (*config).set_max_version(max_version)?;
+                config.set_max_version(max_version)?;
             }
 
-            let ctx = Box::into_raw(Box::new(Context::new(&*config)?));
+            let ctx = Arc::new(Context::new(config));
 
-            let stream_ptr = Box::into_raw(Box::new(stream));
-            let session = (*ctx).establish(&mut *stream_ptr, None)?;
-            let session = Box::into_raw(Box::new(std::mem::transmute::<
-                Session<'_>,
-                Session<'static>,
-            >(session))); // yolo
+            ctx.establish(stream, None)?;
 
             Ok(TlsStream {
                 role: ProtocolRole::Server,
-                ca_certs: ::std::ptr::null_mut(),
-                ca_cert_list: ::std::ptr::null_mut(),
-                cred_pk: pk,
+                ca_certs: Vec::new(),
+                ca_cert_list: Arc::new(MbedtlsList::new()),
+                cred_pk: Some(pk),
                 cred_certs: cert_chain,
                 cred_cert_list: cert_list,
                 entropy: entropy,
                 rng: rng,
                 config: config,
                 ctx: ctx,
-                session: session,
-                socket: stream_ptr,
+                stream,
             })
         }
     }
@@ -505,21 +462,21 @@ impl TlsAcceptor {
 
 impl<S> TlsStream<S> {
     pub fn get_ref(&self) -> &S {
-        unsafe { self.socket.as_ref().unwrap() }
+        &self.stream
     }
 
     pub fn get_mut(&mut self) -> &mut S {
-        unsafe { self.socket.as_mut().unwrap() }
+        &mut self.stream
     }
 
     pub fn buffered_read_size(&self) -> Result<usize, Error> {
-        Ok(unsafe { (*self.session).bytes_available() })
+        Ok(self.ctx.bytes_available())
     }
 
     pub fn peer_certificate(&self) -> Result<Option<Certificate>, Error> {
-        match unsafe { (*self.session).peer_cert() } {
+        match self.ctx.peer_cert()? {
             None => Ok(None),
-            Some(mut certs) => match certs.next() {
+            Some(mut certs) => match certs.iter().next() {
                 None => Ok(None),
                 Some(c) => Ok(Some(Certificate::from_der(c.as_der())?)),
             },
@@ -529,7 +486,7 @@ impl<S> TlsStream<S> {
     fn server_certificate(&self) -> Result<Option<Certificate>, Error> {
         match self.role {
             ProtocolRole::Client => self.peer_certificate(),
-            ProtocolRole::Server => match unsafe { (*self.cred_certs).first() } {
+            ProtocolRole::Server => match self.cred_certs.first() {
                 None => Ok(None),
                 Some(c) => Ok(Some(Certificate::from_der(c.as_der())?)),
             },
@@ -542,10 +499,7 @@ impl<S> TlsStream<S> {
             None => return Ok(None),
         };
 
-        // TODO this is needed
-        let lcert: &Certificate = &*(cert.0);
-
-        let md = match lcert.digest_type() {
+        let md = match cert.0.digest_type() {
             MdType::Md5 | MdType::Sha1 => MdType::Sha256,
             md => md,
         };
@@ -560,26 +514,22 @@ impl<S> TlsStream<S> {
 
     pub fn shutdown(&mut self) -> io::Result<()> {
         // Shutdown happens as a result of drop ...
-        unsafe {
-            Box::from_raw(self.session);
-            self.session = ::std::ptr::null_mut();
-        }
         Ok(())
     }
 }
 
 impl<S: io::Read + io::Write> io::Read for TlsStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        unsafe { (*self.session).read(buf) }
+        self.ctx.read(buf)
     }
 }
 
 impl<S: io::Read + io::Write> io::Write for TlsStream<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        unsafe { (*self.session).write(buf) }
+        self.ctx.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        unsafe { (*self.session).flush() }
+        self.ctx.flush()
     }
 }
