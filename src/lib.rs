@@ -218,7 +218,7 @@ where
     }
 }
 
-impl<S> MidHandshakeTlsStream<S> {
+impl<S: 'static> MidHandshakeTlsStream<S> {
     /// Returns a shared reference to the inner stream.
     pub fn get_ref(&self) -> &S {
         self.0.get_ref()
@@ -232,7 +232,7 @@ impl<S> MidHandshakeTlsStream<S> {
 
 impl<S> MidHandshakeTlsStream<S>
 where
-    S: io::Read + io::Write,
+    S: io::Read + io::Write + Send + Sync + 'static,
 {
     /// Restarts the handshake process.
     ///
@@ -500,7 +500,7 @@ impl TlsConnector {
         stream: S,
     ) -> result::Result<TlsStream<S>, HandshakeError<S>>
     where
-        S: io::Read + io::Write,
+        S: io::Read + io::Write + Send + Sync + 'static,
     {
         let s = self.0.connect(domain, stream)?;
         Ok(TlsStream(s))
@@ -610,7 +610,7 @@ impl TlsAcceptor {
     /// again.
     pub fn accept<S>(&self, stream: S) -> result::Result<TlsStream<S>, HandshakeError<S>>
     where
-        S: io::Read + io::Write,
+        S: io::Read + io::Write + Send + Sync + 'static,
     {
         match self.0.accept(stream) {
             Ok(s) => Ok(TlsStream(s)),
@@ -628,7 +628,7 @@ impl<S: fmt::Debug> fmt::Debug for TlsStream<S> {
     }
 }
 
-impl<S> TlsStream<S> {
+impl<S: 'static> TlsStream<S> {
     /// Returns a shared reference to the inner stream.
     pub fn get_ref(&self) -> &S {
         self.0.get_ref()
@@ -640,7 +640,7 @@ impl<S> TlsStream<S> {
     }
 }
 
-impl<S: io::Read + io::Write> TlsStream<S> {
+impl<S: io::Read + io::Write + 'static> TlsStream<S> {
     /// Returns the number of bytes that can be read without resulting in any
     /// network calls.
     pub fn buffered_read_size(&self) -> Result<usize> {

@@ -18,6 +18,7 @@ use std::error;
 use std::fmt::{self, Debug};
 use std::fs;
 use std::io::{self, Read};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use {Protocol, TlsAcceptorBuilder, TlsConnectorBuilder};
@@ -92,7 +93,8 @@ impl<S> From<TlsError> for HandshakeError<S> {
 
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        error::Error::source(&self)
+        // error::Error::source(&self)
+        todo!()
     }
 }
 
@@ -174,8 +176,8 @@ pub struct TlsStream<S> {
     entropy: Arc<OsEntropy>,
     rng: Arc<CtrDrbg>,
     config: Arc<Config>,
-    ctx: Arc<Context>,
-    stream: S,
+    ctx: Context,
+    _stream: PhantomData<S>,
 }
 
 unsafe impl<S> Sync for TlsStream<S> {}
@@ -210,7 +212,7 @@ pub enum HandshakeError<S> {
     WouldBlock(MidHandshakeTlsStream<S>),
 }
 
-impl<S> MidHandshakeTlsStream<S> {
+impl<S: 'static> MidHandshakeTlsStream<S> {
     pub fn get_ref(&self) -> &S {
         self.stream.get_ref()
     }
@@ -309,18 +311,19 @@ impl TlsConnector {
         };
 
         let ca_vec = cert_to_vec(&self.root_certificates);
-        let mut ca_list = Arc::new(MbedtlsList::new());
-        ca_vec.into_iter().for_each(|c| ca_list.push(c));
+        let mut ca_list = MbedtlsList::new();
+        ca_vec.clone().into_iter().for_each(|c| ca_list.push(c));
+        let ca_list = Arc::new(ca_list);
 
         let entropy = Arc::new(OsEntropy::new());
-        let rng = Arc::new(CtrDrbg::new(entropy, None)?);
-        let mut config = Arc::new(Config::new(
+        let rng = Arc::new(CtrDrbg::new(entropy.clone(), None)?);
+        let mut config = Config::new(
             Endpoint::Client,
             Transport::Stream,
             Preset::Default,
-        ));
-        config.set_rng(rng);
-        config.set_ca_list(ca_list, None);
+        );
+        config.set_rng(rng.clone());
+        config.set_ca_list(ca_list.clone(), None);
 
         let mut cred_certs = Default::default();
         let mut cred_cert_list = Arc::new(MbedtlsList::new());
@@ -328,11 +331,14 @@ impl TlsConnector {
 
         if let Some((certificates, mut pk)) = identity {
             cred_certs = certificates.to_vec();
-            cred_certs.into_iter().for_each(|c| cred_cert_list.push(c));
-            let cpk = Arc::new(Pk::from_private_key(&pk.write_private_der_vec()?, None)?);
-            cred_pk = Some(cpk);
+            let mut tmp = MbedtlsList::new();
+            cred_certs.clone().into_iter().for_each(|c| tmp.push(c));
+            cred_cert_list = Arc::new(tmp);
 
-            config.push_cert(cred_cert_list, cpk)?;
+            let cpk = Arc::new(Pk::from_private_key(&pk.write_private_der_vec()?, None)?);
+            cred_pk = Some(cpk.clone());
+            
+            config.push_cert(cred_cert_list.clone(), cpk.clone())?;
         }
 
         if self.accept_invalid_certs {
@@ -346,7 +352,8 @@ impl TlsConnector {
             config.set_max_version(max_version)?;
         }
 
-        let ctx = Arc::new(Context::new(config));
+        let config = Arc::new(config);
+        let mut ctx = Context::new(config.clone());
 
         let hostname = if self.accept_invalid_hostnames {
             None
@@ -366,8 +373,8 @@ impl TlsConnector {
             entropy,
             rng,
             config,
-            ctx: ctx,
-            stream,
+            ctx,
+            _stream: PhantomData,
         })
     }
 }
@@ -414,23 +421,23 @@ impl TlsAcceptor {
 
         let key: &mut Pk = &mut keys.pop().unwrap().0.map_err(|_| TlsError::PkInvalidAlg)?;
 
-        unsafe {
             let pk = Arc::new(Pk::from_private_key(&key.write_private_der_vec()?, None)?);
-            let mut cert_list = Arc::new(MbedtlsList::new());
+            let mut cert_list = MbedtlsList::new();
             cert_chain
                 .to_vec()
                 .into_iter()
                 .for_each(|c| cert_list.push(c));
+            let cert_list = Arc::new(cert_list);
 
             let entropy = Arc::new(OsEntropy::new());
-            let rng = Arc::new(CtrDrbg::new(entropy, None)?);
-            let mut config = Arc::new(Config::new(
+            let rng = Arc::new(CtrDrbg::new(entropy.clone(), None)?);
+            let mut config = Config::new(
                 Endpoint::Server,
                 Transport::Stream,
                 Preset::Default,
-            ));
-            config.set_rng(rng);
-            config.push_cert(cert_list, pk)?;
+            );
+            config.set_rng(rng.clone());
+            config.push_cert(cert_list.clone(), pk.clone())?;
 
             if let Some(min_version) = map_version(self.min_protocol) {
                 config.set_min_version(min_version)?;
@@ -439,7 +446,9 @@ impl TlsAcceptor {
                 config.set_max_version(max_version)?;
             }
 
-            let ctx = Arc::new(Context::new(config));
+            let config = Arc::new(config);
+
+            let mut ctx = Context::new(config.clone());
 
             ctx.establish(stream, None)?;
 
@@ -450,23 +459,22 @@ impl TlsAcceptor {
                 cred_pk: Some(pk),
                 cred_certs: cert_chain,
                 cred_cert_list: cert_list,
-                entropy: entropy,
-                rng: rng,
-                config: config,
-                ctx: ctx,
-                stream,
+                entropy,
+                rng,
+                config,
+                ctx,
+                _stream: PhantomData,
             })
-        }
     }
 }
 
-impl<S> TlsStream<S> {
+impl<S: 'static> TlsStream<S> {
     pub fn get_ref(&self) -> &S {
-        &self.stream
+        self.ctx.io().unwrap().downcast_ref().unwrap()
     }
 
     pub fn get_mut(&mut self) -> &mut S {
-        &mut self.stream
+        self.ctx.io_mut().unwrap().downcast_mut().unwrap()
     }
 
     pub fn buffered_read_size(&self) -> Result<usize, Error> {
