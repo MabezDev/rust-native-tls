@@ -2,15 +2,14 @@ extern crate mbedtls;
 
 use self::mbedtls::ssl::context::IoCallback;
 
+use self::mbedtls::alloc::{Box as MbedtlsBox, List as MbedtlsList};
 use self::mbedtls::hash::{Md, Type as MdType};
 use self::mbedtls::pk::Pk;
 use self::mbedtls::pkcs12::{Pfx, Pkcs12Error};
+use self::mbedtls::rng::{CtrDrbg, OsEntropy};
 use self::mbedtls::ssl::config::{Endpoint, Preset, Transport};
 use self::mbedtls::ssl::{Config, Context, Version};
 use self::mbedtls::x509::certificate::Certificate as MbedtlsCert;
-// use self::mbedtls::x509::certificate::List as CertList;
-use self::mbedtls::alloc::{Box as MbedtlsBox, List as MbedtlsList};
-use self::mbedtls::rng::{CtrDrbg, OsEntropy};
 use self::mbedtls::Error as TlsError;
 use self::mbedtls::Result as TlsResult;
 
@@ -18,7 +17,6 @@ use std::error;
 use std::fmt::{self, Debug};
 use std::fs;
 use std::io::{self, Read};
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use {Protocol, TlsAcceptorBuilder, TlsConnectorBuilder};
@@ -166,6 +164,7 @@ fn cert_to_vec(certs_in: &[::Certificate]) -> Vec<MbedtlsBox<MbedtlsCert>> {
     certs_in.iter().map(|cert| (cert.0).0.clone()).collect()
 }
 
+#[allow(unused)]
 pub struct TlsStream<S> {
     role: ProtocolRole,
     ca_certs: Vec<MbedtlsBox<MbedtlsCert>>,
@@ -176,8 +175,7 @@ pub struct TlsStream<S> {
     entropy: Arc<OsEntropy>,
     rng: Arc<CtrDrbg>,
     config: Arc<Config>,
-    ctx: Context,
-    _stream: PhantomData<S>,
+    ctx: Context<S>,
 }
 
 unsafe impl<S> Sync for TlsStream<S> {}
@@ -212,7 +210,7 @@ pub enum HandshakeError<S> {
     WouldBlock(MidHandshakeTlsStream<S>),
 }
 
-impl<S: 'static> MidHandshakeTlsStream<S> {
+impl<S> MidHandshakeTlsStream<S> {
     pub fn get_ref(&self) -> &S {
         self.stream.get_ref()
     }
@@ -277,8 +275,9 @@ impl TlsConnector {
 
     pub fn connect<S>(&self, domain: &str, stream: S) -> Result<TlsStream<S>, HandshakeError<S>>
     where
-        S: IoCallback + Send + Sync + 'static,
+        S: IoCallback,
     {
+        println!("CONNECTING IN MBETLS");
         let identity = if let Some(identity) = &self.identity {
             let mut keys = (identity.0).0.private_keys().collect::<Vec<_>>();
             let certificates = (identity.0).0.certificates().collect::<Vec<_>>();
@@ -317,11 +316,7 @@ impl TlsConnector {
 
         let entropy = Arc::new(OsEntropy::new());
         let rng = Arc::new(CtrDrbg::new(entropy.clone(), None)?);
-        let mut config = Config::new(
-            Endpoint::Client,
-            Transport::Stream,
-            Preset::Default,
-        );
+        let mut config = Config::new(Endpoint::Client, Transport::Stream, Preset::Default);
         config.set_rng(rng.clone());
         config.set_ca_list(ca_list.clone(), None);
 
@@ -337,7 +332,7 @@ impl TlsConnector {
 
             let cpk = Arc::new(Pk::from_private_key(&pk.write_private_der_vec()?, None)?);
             cred_pk = Some(cpk.clone());
-            
+
             config.push_cert(cred_cert_list.clone(), cpk.clone())?;
         }
 
@@ -374,7 +369,6 @@ impl TlsConnector {
             rng,
             config,
             ctx,
-            _stream: PhantomData,
         })
     }
 }
@@ -397,9 +391,9 @@ impl TlsAcceptor {
 
     pub fn accept<S>(&self, stream: S) -> Result<TlsStream<S>, HandshakeError<S>>
     where
-        // S: io::Read + io::Write,
-        S: IoCallback + Send + Sync + 'static,
+        S: IoCallback,
     {
+        println!("ACCEPTING IN MBETLS");
         let mut keys = self.identity.private_keys().collect::<Vec<_>>();
         let certificates = self.identity.certificates().collect::<Vec<_>>();
 
@@ -421,60 +415,55 @@ impl TlsAcceptor {
 
         let key: &mut Pk = &mut keys.pop().unwrap().0.map_err(|_| TlsError::PkInvalidAlg)?;
 
-            let pk = Arc::new(Pk::from_private_key(&key.write_private_der_vec()?, None)?);
-            let mut cert_list = MbedtlsList::new();
-            cert_chain
-                .to_vec()
-                .into_iter()
-                .for_each(|c| cert_list.push(c));
-            let cert_list = Arc::new(cert_list);
+        let pk = Arc::new(Pk::from_private_key(&key.write_private_der_vec()?, None)?);
+        let mut cert_list = MbedtlsList::new();
+        cert_chain
+            .to_vec()
+            .into_iter()
+            .for_each(|c| cert_list.push(c));
+        let cert_list = Arc::new(cert_list);
 
-            let entropy = Arc::new(OsEntropy::new());
-            let rng = Arc::new(CtrDrbg::new(entropy.clone(), None)?);
-            let mut config = Config::new(
-                Endpoint::Server,
-                Transport::Stream,
-                Preset::Default,
-            );
-            config.set_rng(rng.clone());
-            config.push_cert(cert_list.clone(), pk.clone())?;
+        let entropy = Arc::new(OsEntropy::new());
+        let rng = Arc::new(CtrDrbg::new(entropy.clone(), None)?);
+        let mut config = Config::new(Endpoint::Server, Transport::Stream, Preset::Default);
+        config.set_rng(rng.clone());
+        config.push_cert(cert_list.clone(), pk.clone())?;
 
-            if let Some(min_version) = map_version(self.min_protocol) {
-                config.set_min_version(min_version)?;
-            }
-            if let Some(max_version) = map_version(self.max_protocol) {
-                config.set_max_version(max_version)?;
-            }
+        if let Some(min_version) = map_version(self.min_protocol) {
+            config.set_min_version(min_version)?;
+        }
+        if let Some(max_version) = map_version(self.max_protocol) {
+            config.set_max_version(max_version)?;
+        }
 
-            let config = Arc::new(config);
+        let config = Arc::new(config);
 
-            let mut ctx = Context::new(config.clone());
+        let mut ctx = Context::new(config.clone());
 
-            ctx.establish(stream, None)?;
+        ctx.establish(stream, None)?;
 
-            Ok(TlsStream {
-                role: ProtocolRole::Server,
-                ca_certs: Vec::new(),
-                ca_cert_list: Arc::new(MbedtlsList::new()),
-                cred_pk: Some(pk),
-                cred_certs: cert_chain,
-                cred_cert_list: cert_list,
-                entropy,
-                rng,
-                config,
-                ctx,
-                _stream: PhantomData,
-            })
+        Ok(TlsStream {
+            role: ProtocolRole::Server,
+            ca_certs: Vec::new(),
+            ca_cert_list: Arc::new(MbedtlsList::new()),
+            cred_pk: Some(pk),
+            cred_certs: cert_chain,
+            cred_cert_list: cert_list,
+            entropy,
+            rng,
+            config,
+            ctx,
+        })
     }
 }
 
-impl<S: 'static> TlsStream<S> {
+impl<S> TlsStream<S> {
     pub fn get_ref(&self) -> &S {
-        self.ctx.io().unwrap().downcast_ref().unwrap()
+        self.ctx.io().unwrap()
     }
 
     pub fn get_mut(&mut self) -> &mut S {
-        self.ctx.io_mut().unwrap().downcast_mut().unwrap()
+        self.ctx.io_mut().unwrap()
     }
 
     pub fn buffered_read_size(&self) -> Result<usize, Error> {
@@ -484,7 +473,7 @@ impl<S: 'static> TlsStream<S> {
     pub fn peer_certificate(&self) -> Result<Option<Certificate>, Error> {
         match self.ctx.peer_cert()? {
             None => Ok(None),
-            Some(mut certs) => match certs.iter().next() {
+            Some(certs) => match certs.iter().next() {
                 None => Ok(None),
                 Some(c) => Ok(Some(Certificate::from_der(c.as_der())?)),
             },
